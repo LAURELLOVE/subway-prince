@@ -1,2 +1,5 @@
 .claude/
 subway-prince-artifact.html
+server/data.json
+server/*.log
+server/test-data.json
