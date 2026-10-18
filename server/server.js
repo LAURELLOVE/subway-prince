@@ -43,22 +43,91 @@ function userFor(token) {
   const s = typeof token === 'string' && db.sessions[token];
   return s && s.exp > Date.now() ? s.u : null;
 }
-function register(b) {
-  const u = String(b.username || '').trim(), pw = String(b.password || '');
-  if (!/^[A-Za-z0-9_]{3,16}$/.test(u)) return { ok: false, error: 'Username must be 3-16 letters, numbers or _' };
-  if (pw.length < 6 || pw.length > 100) return { ok: false, error: 'Password must be at least 6 characters' };
-  const key = u.toLowerCase();
-  if (Object.keys(db.users).some(k => k.toLowerCase() === key)) return { ok: false, error: 'That username is taken' };
-  const salt = crypto.randomBytes(16).toString('hex');
-  db.users[u] = { salt, hash: hashPw(pw, salt), created: Date.now() }; saveDb();
-  return { ok: true, username: u, token: newSession(u) };
+// ---- email codes: needs a mail service (Resend) in production; without a key the code is printed in the server log ----
+const MAIL_FROM = process.env.MAIL_FROM || 'Subway Prince <onboarding@resend.dev>';
+const DEV_CODES = process.env.DEV_CODES === '1';           // tests only: also return the code in the response
+const mailLog = new Map();
+async function sendMail(to, subject, text) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) { console.log('[mail not configured] to=' + to + ' | ' + subject + ' | ' + text); return; }
+  try {
+    await fetch('https://api.resend.com/emails', { method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' }, body: JSON.stringify({ from: MAIL_FROM, to: [to], subject, text }) });
+  } catch (e) { console.log('mail failed: ' + e.message); }
 }
-function login(b) {
+// one real person = one address, so dots and +tags in Gmail addresses count as the same one
+function normEmail(e) {
+  e = String(e || '').trim().toLowerCase();
+  if (e.length > 120 || !/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/.test(e)) return null;
+  let [l, d] = e.split('@');
+  if (d === 'googlemail.com') d = 'gmail.com';
+  if (d === 'gmail.com') l = l.split('+')[0].replace(/\./g, '');
+  return l + '@' + d;
+}
+const hashCode = (c, salt) => crypto.createHash('sha256').update(salt + c).digest('hex');
+function setCode(rec, kind) {
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0'), salt = crypto.randomBytes(8).toString('hex');
+  rec.codes = rec.codes || {}; rec.codes[kind] = { salt, h: hashCode(code, salt), exp: Date.now() + 15 * 60000, tries: 0 };
+  return code;
+}
+function checkCode(rec, kind, code) {                       // 15 minutes, 5 tries, then a new code is needed
+  const c = rec.codes && rec.codes[kind];
+  if (!c || c.exp < Date.now() || c.tries >= 5) return false;
+  c.tries++;
+  const x = Buffer.from(hashCode(String(code || '').trim(), c.salt)), y = Buffer.from(c.h);
+  if (x.length === y.length && crypto.timingSafeEqual(x, y)) { delete rec.codes[kind]; return true; }
+  return false;
+}
+const byEmail = n => Object.values(db.users).find(r => r.emailNorm === n);
+const pwError = pw => (pw.length < 6 || pw.length > 100) ? 'Password must be at least 6 characters' : null;
+
+async function register(b) {
+  const u = String(b.username || '').trim(), pw = String(b.password || ''), email = normEmail(b.email);
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(u)) return { ok: false, error: 'Username must be 3-16 letters, numbers or _' };
+  if (!email) return { ok: false, error: 'Enter a valid email address' };
+  if (pwError(pw)) return { ok: false, error: pwError(pw) };
+  if (Object.keys(db.users).some(k => k.toLowerCase() === u.toLowerCase())) return { ok: false, error: 'That username is taken' };
+  if (byEmail(email)) return { ok: false, error: 'That email already has an account' };
+  const salt = crypto.randomBytes(16).toString('hex');
+  const rec = { salt, hash: hashPw(pw, salt), created: Date.now(), email: String(b.email).trim(), emailNorm: email, verified: false };
+  const code = setCode(rec, 'verify'); db.users[u] = rec; saveDb();
+  await sendMail(rec.email, 'Your Subway Prince code', 'Your confirmation code is ' + code + '. It works for 15 minutes.');
+  return { ok: true, username: u, token: newSession(u), verified: false, devCode: DEV_CODES ? code : undefined };
+}
+async function login(b) {
   const u = Object.keys(db.users).find(k => k.toLowerCase() === String(b.username || '').trim().toLowerCase());
   const bad = { ok: false, error: 'Wrong username or password' };
   if (!u) return bad;
-  const rec = db.users[u], a = Buffer.from(hashPw(String(b.password || ''), rec.salt)), h = Buffer.from(rec.hash);
-  return a.length === h.length && crypto.timingSafeEqual(a, h) ? { ok: true, username: u, token: newSession(u) } : bad;
+  const rec = db.users[u], x = Buffer.from(hashPw(String(b.password || ''), rec.salt)), y = Buffer.from(rec.hash);
+  return x.length === y.length && crypto.timingSafeEqual(x, y) ? { ok: true, username: u, token: newSession(u), verified: !!rec.verified } : bad;
+}
+async function verifyEmail(b) {
+  const u = userFor(b.token); if (!u) return { ok: false, error: 'Sign in first' };
+  const rec = db.users[u]; if (rec.verified) return { ok: true };
+  const good = checkCode(rec, 'verify', b.code); if (good) rec.verified = true; saveDb();
+  return good ? { ok: true } : { ok: false, error: 'Wrong or expired code' };
+}
+async function resend(b) {
+  const u = userFor(b.token), rec = u && db.users[u];
+  if (!rec || rec.verified) return { ok: false, error: 'Nothing to confirm' };
+  const code = setCode(rec, 'verify'); saveDb();
+  await sendMail(rec.email, 'Your Subway Prince code', 'Your confirmation code is ' + code + '. It works for 15 minutes.');
+  return { ok: true, devCode: DEV_CODES ? code : undefined };
+}
+async function forgot(b) {                                  // always answers the same, so nobody can probe which emails exist
+  const rec = byEmail(normEmail(b.email));
+  let code;
+  if (rec) { code = setCode(rec, 'reset'); saveDb(); await sendMail(rec.email, 'Reset your Subway Prince password', 'Your reset code is ' + code + '. It works for 15 minutes. If you did not ask for it, ignore this email.'); }
+  return { ok: true, devCode: DEV_CODES ? code : undefined };
+}
+async function resetPw(b) {
+  const rec = byEmail(normEmail(b.email)), pw = String(b.password || '');
+  if (pwError(pw)) return { ok: false, error: pwError(pw) };
+  if (!rec || !checkCode(rec, 'reset', b.code)) { saveDb(); return { ok: false, error: 'Wrong or expired code' }; }
+  rec.salt = crypto.randomBytes(16).toString('hex'); rec.hash = hashPw(pw, rec.salt); rec.verified = true;   // they proved they own the email
+  const name = Object.keys(db.users).find(k => db.users[k] === rec);
+  for (const [t, v] of Object.entries(db.sessions)) if (v.u === name) delete db.sessions[t];                // sign out everywhere
+  saveDb();
+  return { ok: true };
 }
 
 // A stand-in for the browser so the game's code can run without a screen.
@@ -121,10 +190,11 @@ http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') return send(res, 200, { top: leaderboard() });
 
-    if (req.method === 'POST' && (url.pathname === '/api/register' || url.pathname === '/api/login')) {
-      if (limited(authLog, ip, 10)) return send(res, 429, { ok: false, error: 'Too many tries, wait a minute' });
-      const b = await readBody(req);
-      return send(res, 200, url.pathname === '/api/register' ? register(b) : login(b));
+    const AUTH = { '/api/register': register, '/api/login': login, '/api/verify': verifyEmail, '/api/resend': resend, '/api/forgot': forgot, '/api/reset': resetPw };
+    if (req.method === 'POST' && AUTH[url.pathname]) {
+      const mails = ['/api/register', '/api/resend', '/api/forgot'].includes(url.pathname);
+      if (limited(authLog, ip, 30) || (mails && limited(mailLog, ip, 10))) return send(res, 429, { ok: false, error: 'Too many tries, wait a minute' });
+      return send(res, 200, await AUTH[url.pathname](await readBody(req)));
     }
 
     if (req.method === 'POST' && url.pathname === '/api/run/start') {
@@ -133,11 +203,11 @@ http.createServer(async (req, res) => {
       recent.push(now); startLog.set(ip, recent);
       const b = await readBody(req);
       const char = Number.isInteger(b.char) && b.char >= 0 && b.char < 7 ? b.char : 0;
-      const acct = userFor(b.token), name = acct || 'Guest-' + crypto.randomBytes(2).toString('hex');
+      const u = userFor(b.token), acct = !!(u && db.users[u] && db.users[u].verified), name = u || 'Guest-' + crypto.randomBytes(2).toString('hex');
       const runId = crypto.randomBytes(12).toString('hex'), seed = crypto.randomBytes(4).readUInt32BE(0);
-      pending.set(runId, { seed, char, name, acct: !!acct, startedAt: now, ip });
+      pending.set(runId, { seed, char, name, acct, startedAt: now, ip });
       for (const [k, v] of pending) if (now - v.startedAt > 3600000) pending.delete(k);
-      return send(res, 200, { runId, seed, account: !!acct });
+      return send(res, 200, { runId, seed, account: acct, signedIn: !!u });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/run/finish') {

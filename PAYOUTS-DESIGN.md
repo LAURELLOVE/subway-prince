@@ -17,7 +17,9 @@ Files: `server/server.js` (the server), `server/test.js` (checks replay and comm
 
 Accounts (built): players sign up with a username and password, stored as a salted scrypt hash. Sessions last 30 days. Only runs from signed-in players reach the online leaderboard; guests still get a checked result but no rank. Sign-up and login are rate limited. Checks: `server/test-accounts.js`.
 
-Still open before real prizes: email or phone verification so one person cannot make many accounts, password reset, daily run limits and review of suspicious patterns such as perfect bot-like inputs.
+Email confirmation and password reset (built): sign-up sends a 6-digit code, only confirmed accounts rank, one account per email address, and reset codes sign the player out everywhere. Real email needs a Resend key (see `server/README.md`).
+
+Still open before real prizes: phone verification (an email is easy to create), daily run limits and review of suspicious patterns such as perfect bot-like inputs.
 
 ## 2. Winning and payouts (plan)
 

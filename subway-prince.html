@@ -32,30 +32,54 @@ const API_URL = '';
 const API = API_URL || (typeof location !== 'undefined' && location.port === '8787' ? location.origin : '');
 let token = '';
 try { playerName = localStorage.getItem('sp_name') || playerName; localStorage.setItem('sp_name', playerName); token = localStorage.getItem('sp_token') || ''; } catch (e) {}
-function openAuth() {
-  if (typeof document.createElement !== 'function' || document.getElementById('auth')) return;
-  const d = document.createElement('div'); d.id = 'auth';
-  d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);z-index:10;font:15px system-ui,sans-serif';
-  d.innerHTML = '<div style="background:#1b1830;color:#fff;padding:20px;border-radius:14px;width:min(320px,86vw);display:flex;flex-direction:column;gap:10px"><b style="font-size:18px">' + (token ? 'Signed in as ' + playerName : 'Sign in to join the online board') + '</b>'
-    + '<input id="au" placeholder="Username (3-16 letters, numbers, _)" maxlength="16" autocomplete="username" style="padding:10px;border-radius:8px;border:0">'
-    + '<input id="ap" type="password" placeholder="Password (6+ characters)" autocomplete="current-password" style="padding:10px;border-radius:8px;border:0">'
-    + '<div id="am" style="min-height:18px;color:#ffb3b3"></div>'
-    + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button id="ain">Sign in</button><button id="acr">Create account</button><button id="aout">Sign out</button><button id="acl">Close</button></div></div>';
-  document.body.appendChild(d);
-  d.querySelectorAll('button').forEach(b => { b.style.cssText = 'padding:9px 12px;border:0;border-radius:8px;background:#2f7fd6;color:#fff;font-weight:700;cursor:pointer'; });
-  const $ = id => document.getElementById(id), msg = t => { $('am').textContent = t; };
-  const go = path => {
-    msg('Please wait...');
-    fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: $('au').value, password: $('ap').value }) })
-      .then(r => r.json()).then(j => {
-        if (j.ok) { token = j.token; playerName = j.username; try { localStorage.setItem('sp_token', token); localStorage.setItem('sp_name', playerName); } catch (e) {} d.remove(); toast = { s: 'Signed in as ' + playerName, t: 2.5 }; boardAt = 0; }
-        else msg(j.error || 'Something went wrong');
-      }).catch(() => msg('Cannot reach the server'));
+let accVerified = false;
+try { accVerified = localStorage.getItem('sp_ver') === '1'; } catch (e) {}
+function setAuth(j) {
+  token = j.token || token; playerName = j.username || playerName; accVerified = !!j.verified;
+  try { localStorage.setItem('sp_token', token); localStorage.setItem('sp_name', playerName); localStorage.setItem('sp_ver', accVerified ? '1' : '0'); } catch (e) {}
+}
+function signOut() {
+  token = ''; accVerified = false; playerName = 'Player' + Math.floor(1000 + Math.random() * 9000);
+  try { localStorage.removeItem('sp_token'); localStorage.setItem('sp_name', playerName); localStorage.setItem('sp_ver', '0'); } catch (e) {}
+}
+function openAuth(mode) {
+  if (typeof document.createElement !== 'function') return;
+  let d = document.getElementById('auth');
+  if (!d) {
+    d = document.createElement('div'); d.id = 'auth';
+    d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);z-index:10;font:15px system-ui,sans-serif';
+    document.body.appendChild(d);
+  }
+  mode = mode || (token ? (accVerified ? 'account' : 'verify') : 'login');
+  const f = (id, ph, type, extra) => '<input id="' + id + '" type="' + (type || 'text') + '" placeholder="' + ph + '" ' + (extra || '') + ' style="padding:10px;border-radius:8px;border:0">';
+  const views = {
+    login: ['Sign in', f('au', 'Username', 'text', 'maxlength=16 autocomplete=username') + f('ap', 'Password', 'password', 'autocomplete=current-password'), [['a_in', 'Sign in'], ['a_new', 'Create account'], ['a_fg', 'Forgot password'], ['a_x', 'Close']]],
+    register: ['Create account', f('au', 'Username (3-16 letters, numbers, _)', 'text', 'maxlength=16') + f('ae', 'Email (to confirm it is you)', 'email') + f('ap', 'Password (6+ characters)', 'password', 'autocomplete=new-password'), [['a_reg', 'Create account'], ['a_back', 'Back'], ['a_x', 'Close']]],
+    verify: ['Confirm your email', '<div>We sent a 6-digit code to your email. Confirm it to join the online board.</div>' + f('ac', '6-digit code', 'text', 'maxlength=6 inputmode=numeric'), [['a_ver', 'Confirm'], ['a_rs', 'Send a new code'], ['a_out', 'Sign out'], ['a_x', 'Close']]],
+    forgot: ['Reset password', f('ae', 'Email of your account', 'email'), [['a_send', 'Send code'], ['a_have', 'I have a code'], ['a_back', 'Back']]],
+    reset: ['Choose a new password', f('ae', 'Email', 'email') + f('ac', '6-digit code', 'text', 'maxlength=6 inputmode=numeric') + f('ap', 'New password (6+ characters)', 'password', 'autocomplete=new-password'), [['a_do', 'Save password'], ['a_back', 'Back']]],
+    account: ['Signed in as ' + playerName, '<div>Your email is confirmed. Your runs count on the online board.</div>', [['a_out', 'Sign out'], ['a_x', 'Close']]]
   };
-  $('ain').onclick = () => go('/api/login'); $('acr').onclick = () => go('/api/register');
-  $('aout').onclick = () => { token = ''; playerName = 'Player' + Math.floor(1000 + Math.random() * 9000); try { localStorage.removeItem('sp_token'); localStorage.setItem('sp_name', playerName); } catch (e) {} d.remove(); };
-  $('acl').onclick = () => d.remove();
-  $('au').focus();
+  const v = views[mode];
+  d.innerHTML = '<div style="background:#1b1830;color:#fff;padding:20px;border-radius:14px;width:min(320px,86vw);display:flex;flex-direction:column;gap:10px"><b style="font-size:18px">' + v[0] + '</b>' + v[1]
+    + '<div id="am" style="min-height:18px;color:#ffb3b3"></div><div style="display:flex;gap:8px;flex-wrap:wrap">' + v[2].map(b => '<button id="' + b[0] + '">' + b[1] + '</button>').join('') + '</div></div>';
+  d.querySelectorAll('button').forEach(b => { b.style.cssText = 'padding:9px 12px;border:0;border-radius:8px;background:#2f7fd6;color:#fff;font-weight:700;cursor:pointer'; });
+  const $ = id => document.getElementById(id), msg = t => { $('am').textContent = t; }, val = id => ($(id) ? $(id).value : ''), on = (id, fn) => { if ($(id)) $(id).onclick = fn; };
+  const call = (path, body, done) => {
+    msg('Please wait...');
+    fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({ token }, body)) })
+      .then(r => r.json()).then(j => { if (j.ok) done(j); else msg(j.error || 'Something went wrong'); }).catch(() => msg('Cannot reach the server'));
+  };
+  const dev = j => { if (j.devCode) $('am').textContent = 'Test mode code: ' + j.devCode; };
+  on('a_x', () => d.remove()); on('a_back', () => openAuth('login')); on('a_new', () => openAuth('register')); on('a_fg', () => openAuth('forgot')); on('a_have', () => openAuth('reset'));
+  on('a_in', () => call('/api/login', { username: val('au'), password: val('ap') }, j => { setAuth(j); if (j.verified) { d.remove(); toast = { s: 'Signed in as ' + playerName, t: 2.5 }; boardAt = 0; } else openAuth('verify'); }));
+  on('a_reg', () => call('/api/register', { username: val('au'), email: val('ae'), password: val('ap') }, j => { setAuth(j); openAuth('verify'); dev(j); }));
+  on('a_ver', () => call('/api/verify', { code: val('ac') }, () => { accVerified = true; try { localStorage.setItem('sp_ver', '1'); } catch (e) {} d.remove(); toast = { s: 'Email confirmed. You are on the board!', t: 3 }; boardAt = 0; }));
+  on('a_rs', () => call('/api/resend', {}, j => { msg('New code sent.'); dev(j); }));
+  on('a_send', () => call('/api/forgot', { email: val('ae') }, j => { openAuth('reset'); $('am').textContent = 'If that email has an account, a code is on its way.'; dev(j); }));
+  on('a_do', () => call('/api/reset', { email: val('ae'), code: val('ac'), password: val('ap') }, () => { openAuth('login'); $('am').textContent = 'Password changed. Sign in with it.'; }));
+  on('a_out', () => { signOut(); d.remove(); });
+  const first = d.querySelector('input'); if (first) first.focus();
 }
 
 // ---------- audio ----------
@@ -268,7 +292,7 @@ function startGame() {
   if (!API) { offline(); return; }
   starting = true;
   fetch(API + '/api/run/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, char: sel }) })
-    .then(r => r.json()).then(j => { starting = false; if (j && j.runId) { if (token && !j.account) { token = ''; try { localStorage.removeItem('sp_token'); } catch (e) {} toast = { s: 'Session expired. Sign in again.', t: 3 }; } beginRun(j.seed, j.runId); } else offline(); })
+    .then(r => r.json()).then(j => { starting = false; if (j && j.runId) { if (token && !j.signedIn) { signOut(); toast = { s: 'Session expired. Sign in again.', t: 3 }; } else if (token && !j.account) toast = { s: 'Confirm your email to join the board.', t: 3 }; beginRun(j.seed, j.runId); } else offline(); })
     .catch(() => { starting = false; offline(); });
 }
 function loadBoard() {
@@ -843,7 +867,7 @@ function drawMenu() {
   ctx.fillStyle = '#000000a8'; ctx.fillRect(0, 0, W, H);
   text('Treasury: ' + bank + ' coins', CX, 780, 16, '#ffd23f');
   btn(W - 56, 776, 92, 28, muted ? 'SOUND OFF' : 'SOUND ON', '#333', toggleMute, 12);
-  if (API) btn(72, 28, 124, 28, token ? playerName : 'SIGN IN', token ? '#2f7fd6' : '#d68a1f', openAuth, 12);
+  if (API) btn(72, 28, 124, 28, token ? playerName + (accVerified ? '' : ' (confirm)') : 'SIGN IN', token ? (accVerified ? '#2f7fd6' : '#c2551f') : '#d68a1f', () => openAuth(), 12);
   if (toast.t > 0) text(toast.s, CX, 58, 18, '#8dff7a');
   if (state === 'menu') {
     text('SUBWAY', CX, 130, 62, '#ffd23f'); text('PRINCE', CX, 190, 62, '#ff5d8f');
