@@ -1,0 +1,12 @@
+# One-click deploy on Render: New > Blueprint > pick this repository.
+services:
+  - type: web
+    name: subway-prince
+    runtime: node
+    plan: free
+    buildCommand: "echo no build step"
+    startCommand: node server/server.js
+    healthCheckPath: /api/leaderboard
+    envVars:
+      - key: DB_FILE
+        value: /tmp/subway-prince-data.json
