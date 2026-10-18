@@ -30,7 +30,33 @@ let acc = 0, ticks = 0, inputs = [], online = null, verified = null, starting = 
 // Set API_URL to the address of your score server to turn on verified online play. Empty = offline play.
 const API_URL = '';
 const API = API_URL || (typeof location !== 'undefined' && location.port === '8787' ? location.origin : '');
-try { playerName = localStorage.getItem('sp_name') || playerName; localStorage.setItem('sp_name', playerName); } catch (e) {}
+let token = '';
+try { playerName = localStorage.getItem('sp_name') || playerName; localStorage.setItem('sp_name', playerName); token = localStorage.getItem('sp_token') || ''; } catch (e) {}
+function openAuth() {
+  if (typeof document.createElement !== 'function' || document.getElementById('auth')) return;
+  const d = document.createElement('div'); d.id = 'auth';
+  d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);z-index:10;font:15px system-ui,sans-serif';
+  d.innerHTML = '<div style="background:#1b1830;color:#fff;padding:20px;border-radius:14px;width:min(320px,86vw);display:flex;flex-direction:column;gap:10px"><b style="font-size:18px">' + (token ? 'Signed in as ' + playerName : 'Sign in to join the online board') + '</b>'
+    + '<input id="au" placeholder="Username (3-16 letters, numbers, _)" maxlength="16" autocomplete="username" style="padding:10px;border-radius:8px;border:0">'
+    + '<input id="ap" type="password" placeholder="Password (6+ characters)" autocomplete="current-password" style="padding:10px;border-radius:8px;border:0">'
+    + '<div id="am" style="min-height:18px;color:#ffb3b3"></div>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button id="ain">Sign in</button><button id="acr">Create account</button><button id="aout">Sign out</button><button id="acl">Close</button></div></div>';
+  document.body.appendChild(d);
+  d.querySelectorAll('button').forEach(b => { b.style.cssText = 'padding:9px 12px;border:0;border-radius:8px;background:#2f7fd6;color:#fff;font-weight:700;cursor:pointer'; });
+  const $ = id => document.getElementById(id), msg = t => { $('am').textContent = t; };
+  const go = path => {
+    msg('Please wait...');
+    fetch(API + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: $('au').value, password: $('ap').value }) })
+      .then(r => r.json()).then(j => {
+        if (j.ok) { token = j.token; playerName = j.username; try { localStorage.setItem('sp_token', token); localStorage.setItem('sp_name', playerName); } catch (e) {} d.remove(); toast = { s: 'Signed in as ' + playerName, t: 2.5 }; boardAt = 0; }
+        else msg(j.error || 'Something went wrong');
+      }).catch(() => msg('Cannot reach the server'));
+  };
+  $('ain').onclick = () => go('/api/login'); $('acr').onclick = () => go('/api/register');
+  $('aout').onclick = () => { token = ''; playerName = 'Player' + Math.floor(1000 + Math.random() * 9000); try { localStorage.removeItem('sp_token'); localStorage.setItem('sp_name', playerName); } catch (e) {} d.remove(); };
+  $('acl').onclick = () => d.remove();
+  $('au').focus();
+}
 
 // ---------- audio ----------
 let actx = null;
@@ -241,8 +267,8 @@ function startGame() {
   const offline = () => beginRun((Math.random() * 4294967296) >>> 0, null);
   if (!API) { offline(); return; }
   starting = true;
-  fetch(API + '/api/run/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: playerName, char: sel }) })
-    .then(r => r.json()).then(j => { starting = false; if (j && j.runId) beginRun(j.seed, j.runId); else offline(); })
+  fetch(API + '/api/run/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, char: sel }) })
+    .then(r => r.json()).then(j => { starting = false; if (j && j.runId) { if (token && !j.account) { token = ''; try { localStorage.removeItem('sp_token'); } catch (e) {} toast = { s: 'Session expired. Sign in again.', t: 3 }; } beginRun(j.seed, j.runId); } else offline(); })
     .catch(() => { starting = false; offline(); });
 }
 function loadBoard() {
@@ -255,6 +281,7 @@ function submitRun() {
     .then(r => r.json()).then(j => { verified = j; boardAt = 0; }).catch(() => { verified = { ok: false }; });
 }
 addEventListener('keydown', e => {
+  if (e.target && e.target.tagName === 'INPUT') return;
   const k = e.key.toLowerCase();
   const m = { arrowleft: 'left', a: 'left', arrowright: 'right', d: 'right', arrowup: 'up', w: 'up', ' ': 'up', arrowdown: 'down', s: 'down' }[k];
   if (k === 'm') { toggleMute(); return; }
@@ -816,6 +843,7 @@ function drawMenu() {
   ctx.fillStyle = '#000000a8'; ctx.fillRect(0, 0, W, H);
   text('Treasury: ' + bank + ' coins', CX, 780, 16, '#ffd23f');
   btn(W - 56, 776, 92, 28, muted ? 'SOUND OFF' : 'SOUND ON', '#333', toggleMute, 12);
+  if (API) btn(72, 28, 124, 28, token ? playerName : 'SIGN IN', token ? '#2f7fd6' : '#d68a1f', openAuth, 12);
   if (toast.t > 0) text(toast.s, CX, 58, 18, '#8dff7a');
   if (state === 'menu') {
     text('SUBWAY', CX, 130, 62, '#ffd23f'); text('PRINCE', CX, 190, 62, '#ff5d8f');

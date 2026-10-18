@@ -17,11 +17,49 @@ const ACTIONS = new Set(['left', 'right', 'up', 'down']);
 const html = fs.readFileSync(GAME_FILE, 'utf8');
 const SCRIPT = html.slice(html.indexOf('<script>') + 8, html.indexOf('</script>'));
 
-let db = { scores: [] };
+let db = { scores: [], users: {}, sessions: {} };
 try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch (e) {}
+db.scores = db.scores || []; db.users = db.users || {}; db.sessions = db.sessions || {};
 const saveDb = () => fs.writeFileSync(DB_FILE, JSON.stringify(db));
 const pending = new Map();               // runId -> { seed, char, name, startedAt, ip }
 const startLog = new Map();              // ip -> recent start times (rate limit)
+const authLog = new Map();
+const SESSION_MS = 30 * 24 * 3600 * 1000;
+
+// ---- accounts: username + password, stored as a salted scrypt hash, no outside services ----
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
+function limited(map, ip, max) {
+  const now = Date.now(), recent = (map.get(ip) || []).filter(t => now - t < 60000);
+  if (recent.length >= max) return true;
+  recent.push(now); map.set(ip, recent); return false;
+}
+function newSession(username) {
+  const token = crypto.randomBytes(24).toString('hex'), now = Date.now();
+  for (const [k, v] of Object.entries(db.sessions)) if (v.exp < now) delete db.sessions[k];
+  db.sessions[token] = { u: username, exp: now + SESSION_MS }; saveDb();
+  return token;
+}
+function userFor(token) {
+  const s = typeof token === 'string' && db.sessions[token];
+  return s && s.exp > Date.now() ? s.u : null;
+}
+function register(b) {
+  const u = String(b.username || '').trim(), pw = String(b.password || '');
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(u)) return { ok: false, error: 'Username must be 3-16 letters, numbers or _' };
+  if (pw.length < 6 || pw.length > 100) return { ok: false, error: 'Password must be at least 6 characters' };
+  const key = u.toLowerCase();
+  if (Object.keys(db.users).some(k => k.toLowerCase() === key)) return { ok: false, error: 'That username is taken' };
+  const salt = crypto.randomBytes(16).toString('hex');
+  db.users[u] = { salt, hash: hashPw(pw, salt), created: Date.now() }; saveDb();
+  return { ok: true, username: u, token: newSession(u) };
+}
+function login(b) {
+  const u = Object.keys(db.users).find(k => k.toLowerCase() === String(b.username || '').trim().toLowerCase());
+  const bad = { ok: false, error: 'Wrong username or password' };
+  if (!u) return bad;
+  const rec = db.users[u], a = Buffer.from(hashPw(String(b.password || ''), rec.salt)), h = Buffer.from(rec.hash);
+  return a.length === h.length && crypto.timingSafeEqual(a, h) ? { ok: true, username: u, token: newSession(u) } : bad;
+}
 
 // A stand-in for the browser so the game's code can run without a screen.
 function sandbox() {
@@ -59,7 +97,7 @@ function validInputs(inputs, ticks) {
 
 function leaderboard() {
   const best = new Map();
-  for (const s of db.scores) if (!best.has(s.name) || best.get(s.name).meters < s.meters) best.set(s.name, s);
+  for (const s of db.scores) if (s.acct && (!best.has(s.name) || best.get(s.name).meters < s.meters)) best.set(s.name, s);
   return [...best.values()].sort((a, b) => b.meters - a.meters).slice(0, 20).map(s => ({ name: s.name, meters: s.meters, coins: s.coins }));
 }
 
@@ -83,17 +121,23 @@ http.createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') return send(res, 200, { top: leaderboard() });
 
+    if (req.method === 'POST' && (url.pathname === '/api/register' || url.pathname === '/api/login')) {
+      if (limited(authLog, ip, 10)) return send(res, 429, { ok: false, error: 'Too many tries, wait a minute' });
+      const b = await readBody(req);
+      return send(res, 200, url.pathname === '/api/register' ? register(b) : login(b));
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/run/start') {
       const now = Date.now(), recent = (startLog.get(ip) || []).filter(t => now - t < 60000);
       if (recent.length >= 20) return send(res, 429, { error: 'too many runs, slow down' });
       recent.push(now); startLog.set(ip, recent);
       const b = await readBody(req);
       const char = Number.isInteger(b.char) && b.char >= 0 && b.char < 7 ? b.char : 0;
-      const name = String(b.name || 'Player').replace(/[^\w -]/g, '').slice(0, 16) || 'Player';
+      const acct = userFor(b.token), name = acct || 'Guest-' + crypto.randomBytes(2).toString('hex');
       const runId = crypto.randomBytes(12).toString('hex'), seed = crypto.randomBytes(4).readUInt32BE(0);
-      pending.set(runId, { seed, char, name, startedAt: now, ip });
+      pending.set(runId, { seed, char, name, acct: !!acct, startedAt: now, ip });
       for (const [k, v] of pending) if (now - v.startedAt > 3600000) pending.delete(k);
-      return send(res, 200, { runId, seed });
+      return send(res, 200, { runId, seed, account: !!acct });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/run/finish') {
@@ -106,9 +150,9 @@ http.createServer(async (req, res) => {
       if (ticks / 60 > elapsed + 3) return send(res, 400, { ok: false, error: 'run was faster than real time' });
       const r = replay(run.char, run.seed, ticks, inputs);
       if (!r.over) return send(res, 400, { ok: false, error: 'run did not finish' });
-      db.scores.push({ name: run.name, meters: r.meters, coins: r.coins, char: run.char, at: Date.now() });
+      db.scores.push({ name: run.name, acct: run.acct, meters: r.meters, coins: r.coins, char: run.char, at: Date.now() });
       db.scores = db.scores.slice(-5000); saveDb();
-      const rank = leaderboard().findIndex(s => s.name === run.name) + 1;
+      const rank = run.acct ? leaderboard().findIndex(s => s.name === run.name) + 1 : 0;
       return send(res, 200, { ok: true, meters: r.meters, coins: r.coins, rank });
     }
     send(res, 404, { error: 'not found' });
